@@ -1,22 +1,20 @@
-// index.js
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
+
+app.disableHardwareAcceleration();
 
 let mainWindow;
-
-// 1. CLEAN STARTUP CONFIG
-// Do not use 'kiosk-printing' yet. It hides errors.
-// app.disableHardwareAcceleration(); // Only uncomment if app crashes frequently
 
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    show: false, // Wait until loaded to show
+    show: false,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: true,
+      contextIsolation: false,
+      enableRemoteModule: true,
     }
   });
 
@@ -24,20 +22,13 @@ function createWindow() {
   mainWindow.loadURL(targetUrl);
   mainWindow.removeMenu();
 
-  // 2. FORCE PRINT STYLING (The fix for "Black Print")
-  // We inject CSS that forces the print output to be black text on white paper.
   mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow.webContents.insertCSS(`
-      @media print {
-        body, html, #app, .container {
-          background-color: #FFFFFF !important;
-          color: #000000 !important;
-          margin: 0 !important; 
-          padding: 0 !important;
-        }
-        /* Hide scrollbars and headers if any */
-        ::-webkit-scrollbar { display: none; }
-      }
+    // Block native dialog
+    mainWindow.webContents.executeJavaScript(`
+      window.print = function() {
+        require('electron').ipcRenderer.send('cetak-langsung');
+      };
+      null;
     `);
     mainWindow.show();
   });
@@ -49,54 +40,136 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// =========================================================
-// 3. INTELLIGENT PRINT HANDLER
-// =========================================================
+// ============================================================
+//  PRINTER HELPERS (ESC/POS COMMANDS)
+// ============================================================
+const ESC = '\u001B';
+const GS = '\u001D';
+
+const CMD = {
+  Init: ESC + '@',
+  Cut: GS + 'V' + '\u0041' + '\u0000',
+  NewLine: '\u000A',
+  
+  // Alignment
+  Center: ESC + 'a' + '\u0001',
+  Left: ESC + 'a' + '\u0000',
+  
+  // Fonts
+  BoldOn: ESC + 'E' + '\u0001',
+  BoldOff: ESC + 'E' + '\u0000',
+  
+  // Styling
+  InverseOn: GS + 'B' + '\u0001',  // Black Background
+  InverseOff: GS + 'B' + '\u0000', // Normal
+  
+  // Sizing
+  SizeNormal: GS + '!' + '\u0000',
+  SizeDouble: GS + '!' + '\u0011', // 2x W, 2x H
+  SizeHuge: GS + '!' + '\u0033',   // 4x W, 4x H
+  SizeTall: GS + '!' + '\u0001',   // 1x W, 2x H (Good for Logos)
+};
+
+// Function to build Native QR Code Commands
+function getQRCmds(data) {
+  const len = data.length + 3;
+  const pL = len % 256;
+  const pH = Math.floor(len / 256);
+  
+  // 1. Model (Model 2)
+  let cmd = GS + '(k' + '\u0004\u0000' + '\u0031\u0041\u0032\u0000';
+  // 2. Size (Module Size 6 - Big enough to scan)
+  cmd += GS + '(k' + '\u0003\u0000' + '\u0031\u0043\u0006';
+  // 3. Error Correction (Level L)
+  cmd += GS + '(k' + '\u0003\u0000' + '\u0031\u0045\u0030';
+  // 4. Store Data
+  cmd += GS + '(k' + String.fromCharCode(pL) + String.fromCharCode(pH) + '\u0031\u0050\u0030' + data;
+  // 5. Print QR
+  cmd += GS + '(k' + '\u0003\u0000' + '\u0031\u0051\u0030';
+  
+  return cmd;
+}
+
+// ============================================================
+//  MAIN PRINT HANDLER
+// ============================================================
+let isPrinting = false;
+
 ipcMain.on('cetak-langsung', async (event) => {
+  if (isPrinting) return;
+  isPrinting = true;
+  setTimeout(() => { isPrinting = false; }, 2000);
+
   const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return;
+  console.log("--- ⚡ GENERATING RAW TICKET ⚡ ---");
 
-  console.log("--- Processing Print Request ---");
+  // 1. SCRAPE DATA
+  const data = await win.webContents.executeJavaScript(`
+    (function() {
+      const serviceEl = document.querySelector('.p-service-box') || document.querySelector('.p-service-name');
+      const numberEl = document.querySelector('.p-number');
+      const infoEl = document.querySelector('.p-info');
+      
+      return {
+        service: serviceEl ? serviceEl.innerText.trim() : 'SERVICE',
+        number: numberEl ? numberEl.innerText.trim() : '---',
+        info: infoEl ? infoEl.innerText.trim() : new Date().toLocaleString()
+      };
+    })();
+  `);
 
-  // A. FIND THE CORRECT PRINTER
-  const printers = await win.webContents.getPrintersAsync();
+  // 2. BUILD TICKET BUFFER
+  let buffer = '';
   
-  // LOGIC: specific name OR system default
-  // Update this string to match your printer name exactly if you want to force it
-  const targetPrinterName = "POS-58"; 
+  // -- INITIALIZE --
+  buffer += CMD.Init;
+  buffer += CMD.Center;
+
+  // -- FAKE LOGO (Stylized Text) --
+  // We use Double Height text to mimic the logo header
+  buffer += CMD.BoldOn + CMD.SizeDouble + "IMIGRASI" + CMD.SizeNormal + CMD.BoldOff + CMD.NewLine;
+  buffer += CMD.BoldOn + "FESTIVAL" + CMD.BoldOff + CMD.NewLine;
+  buffer += "Bali Ngurah Rai" + CMD.NewLine;
+  buffer += CMD.NewLine;
+
+  // -- SERVICE BOX (Black Background) --
+  // We add spaces to make the black bar wider visually
+  const paddedService = "   " + data.service + "   ";
   
-  let chosenPrinter = printers.find(p => p.name === targetPrinterName);
+  buffer += CMD.InverseOn; // Turn ON Black Background
+  buffer += CMD.SizeTall;  // Make text taller
+  buffer += paddedService;
+  buffer += CMD.SizeNormal;
+  buffer += CMD.InverseOff; // Turn OFF Black Background
+  buffer += CMD.NewLine;
+  buffer += CMD.NewLine;
+
+  // -- QUEUE NUMBER --
+  buffer += CMD.BoldOn + CMD.SizeHuge + data.number + CMD.SizeNormal + CMD.BoldOff + CMD.NewLine;
+  buffer += CMD.NewLine;
+
+  // -- DATE/INFO --
+  buffer += data.info + CMD.NewLine;
+  buffer += "--------------------------------" + CMD.NewLine;
   
-  if (!chosenPrinter) {
-    console.log(`⚠️ Printer named "${targetPrinterName}" not found. Trying System Default...`);
-    chosenPrinter = printers.find(p => p.isDefault);
-  }
+  // -- QR CODE --
+  // We generate the QR code command for the Ticket Number
+  const qrData = data.service.substring(0,1) + "-" + data.number;
+  buffer += getQRCmds(qrData); 
+  
+  // -- FOOTER --
+  buffer += CMD.NewLine;
+  buffer += CMD.BoldOn + "PLEASE WAIT FOR CALL" + CMD.BoldOff + CMD.NewLine;
+  buffer += "THANK YOU" + CMD.NewLine;
+  buffer += CMD.NewLine + CMD.NewLine + CMD.NewLine + CMD.NewLine; // Feed
+  
+  buffer += CMD.Cut;
 
-  if (!chosenPrinter) {
-    console.error("❌ NO PRINTER FOUND! Please install a printer.");
-    return;
-  }
-
-  console.log(`✅ Using Printer: ${chosenPrinter.name}`);
-
-  // B. CONFIGURE OPTIONS
-  const options = {
-    silent: true,            // Silent mode
-    deviceName: chosenPrinter.name,
-    printBackground: false,  // CRITICAL: Must be FALSE for thermal printers
-    margins: { marginType: 'none' }, 
-    copies: 1
-    // DO NOT SET pageSize HERE. Let the Windows Driver handle the roll length.
-  };
-
-  // C. EXECUTE
-  win.webContents.print(options, (success, failureReason) => {
-    if (!success) {
-      console.error('❌ Print Failed:', failureReason);
-      event.sender.send('status-cetak', { success: false, error: failureReason });
-    } else {
-      console.log('✅ Print Sent to Spooler');
-      event.sender.send('status-cetak', { success: true });
-    }
+  // 3. SEND TO SHARED PRINTER
+  const printerPath = '\\\\localhost\\POS58 Printer';
+  
+  fs.writeFile(printerPath, buffer, (err) => {
+    if (err) console.error("❌ Print Failed:", err);
+    else console.log("✅ Ticket Sent!");
   });
 });

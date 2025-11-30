@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "electron .",
+    "build:win": "electron-packager . antreanapp --platform=win32 --arch=x64 --out=dist --overwrite --asar --icon=icon.ico",
+    "build:win32": "electron-packager . antreanapp --platform=win32 --arch=ia32 --out=dist --overwrite --asar --icon=icon.ico",
     "test": "echo \"Error: no test specified\" && exit 1"
+
   },
   "keywords": [],
   "author": "",

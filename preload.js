@@ -1,31 +1,11 @@
 // preload.js
-const { contextBridge, ipcRenderer } = require('electron');
+const { ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('electronAPI', {
-    // Allows the frontend to listen for success/failure messages
-    onStatus: (callback) => ipcRenderer.on('status-cetak', callback)
-});
+// 1. Intercept standard window.print calls (just in case)
+window.print = () => {
+    ipcRenderer.send('cetak-langsung');
+};
 
-window.addEventListener('DOMContentLoaded', () => {
-    // OVERRIDE standard window.print()
-    // When the PHP website calls window.print(), we hijack it here.
-    const doPrint = () => {
-        console.log('Preload: Intercepting print command...');
-        ipcRenderer.send('cetak-langsung');
-    };
-
-    // Lock the print function so the website can't overwrite it back
-    Object.defineProperty(window, 'print', {
-        configurable: false,
-        writable: false,
-        value: doPrint
-    });
-
-    // Also catch Ctrl+P
-    window.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
-            e.preventDefault();
-            doPrint();
-        }
-    });
-});
+// 2. The PHP file already calls `require('electron')`
+// so it will naturally use the nodeIntegration we enabled in index.js.
+// No extra bridge is needed for the PHP logic.
