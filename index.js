@@ -154,7 +154,7 @@ ipcMain.on('cetak-langsung', async (event) => {
   
   // -- QR CODE --
   // We generate the QR code command for the Ticket Number
-  const qrData = data.service.substring(0,1) + "-" + data.number;
+  const qrData = 'https://star-survei3a.kemenimipas.go.id/ly/x7H36I95';
   buffer += getQRCmds(qrData); 
   
   // -- FOOTER --
